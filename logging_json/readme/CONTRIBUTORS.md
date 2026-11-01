@@ -1,0 +1,3 @@
+- Guewen Baconnier \<<guewen.baconnier@camptocamp.com>\>
+- Sébastien Beau \<<sebastien.beau@akretion.com>\>
+- Baptiste Pellarin \<<swano@ik.me>\>

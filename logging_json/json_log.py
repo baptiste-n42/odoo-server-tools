@@ -1,104 +1,83 @@
-# Copyright 2017 Camptocamp (http://www.camptocamp.com).
-# @author Guewen Baconnier <guewen.baconnier@camptocamp.com>
+# Copyright 2016-2019 Camptocamp SA
 # Copyright 2017 Akretion (http://www.akretion.com).
-# @author Sébastien BEAU <sebastien.beau@akretion.com>
-# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
+# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html)
 
-import json
+import functools
 import logging
 import os
-import re
+import sys
 import threading
-from distutils.util import strtobool
+import uuid
 
-from openerp.netsvc import ColoredFormatter
+from odoo import http
+from odoo.tools import str2bool
 
 _logger = logging.getLogger(__name__)
 
 try:
-    from pythonjsonlogger.jsonlogger import RESERVED_ATTRS, JsonFormatter
-except ImportError:
-    JsonFormatter = object
-    _logger.debug("Cannot 'import pythonjsonlogger'.")
+    from pythonjsonlogger.json import JsonFormatter
+except ImportError:  # pragma: no cover
+    JsonFormatter = logging.Formatter
+    _logger.debug("Cannot import 'pythonjsonlogger'.")
+
+# Same fields as Odoo's default format; ``pid`` and ``dbname`` are set on every
+# record by Odoo's own LogRecord factory (odoo.netsvc.LogRecord).
+LOG_FORMAT = "%(asctime)s %(pid)s %(levelname)s %(dbname)s %(name)s: %(message)s"
 
 
-def is_true(strval):
-    return bool(strtobool(strval or "0".lower()))
-
-
-# The following regex are use to extract information from native odoo log
-# We struct is the following
-# {name_of_the_log : [regex, formatter, extra_vals]}
-# The extra_vals "dict" will be merged into the jsonlogger if the regex match
-# In order to make understandable the regex please add an string example that
-# match
-REGEX = {
-    "openerp.addons.base.ir.ir_cron": [
-        # "cron.object.execute('db', 1, '*', u'base.action.rule', u'_check')"
-        (
-            r"cron\.object\.execute\('.+'(?P<cron_model>[\w.]+).+"
-            r"'(?P<cron_method>[\w.]+)'\)",
-            {},
-            {"cron_running": True},
-        ),
-        # "0.016s (base.action.rule, _check)"
-        (
-            r"(?P<cron_duration_second>[\d.]+)s \("
-            r"(?P<cron_model>[\w.]+), (?P<cron_method>[\w.]+)",
-            {"cron_duration_second": float},
-            {"cron_running": False, "cron_status": "succeeded"},
-        ),
-        # Call of self.pool.get('base.action.rule')._check(
-        # cr, uid, *u'()') failed in Job 43
-        (
-            r"Call of self\.pool\.get\('(?P<cron_model>[\w.]+)'\)"
-            r".(?P<cron_method>[\w.]+)",
-            {},
-            {"cron_running": False, "cron_status": "failed"},
-        ),
-    ],
-}
+def is_true(value):
+    return str2bool(value or "0", default=False)
 
 
 class OdooJsonFormatter(JsonFormatter):
-    def add_fields(self, log_record, record, message_dict):
-        record.pid = os.getpid()
-        record.dbname = getattr(threading.currentThread(), "dbname", "?")
-        _super = super()
-        res = _super.add_fields(log_record, record, message_dict)
-        if log_record["name"] in REGEX:
-            for regex, formatters, extra_vals in REGEX[log_record["name"]]:
-                match = re.match(regex, log_record["message"])
-                if match:
-                    vals = match.groupdict()
-                    for key, func in formatters.items():
-                        vals[key] = func(vals[key])
-                    log_record.update(vals)
-                    if extra_vals:
-                        log_record.update(extra_vals)
-        return res
+    """JSON formatter adding the current user and request id to each record.
+
+    Attributes set on the record that are not part of the format string are
+    output as extra JSON keys by python-json-logger.
+    """
+
+    def add_fields(self, log_data, record, message_dict):
+        thread = threading.current_thread()
+        record.uid = getattr(thread, "uid", None)
+        record.request_id = getattr(thread, "request_uuid", None)
+        return super().add_fields(log_data, record, message_dict)
 
 
-class OdooJsonDevFormatter(ColoredFormatter):
-    def format(self, record):
-        response = super().format(record)
-        extra = {}
-        reserved_attrs = list(RESERVED_ATTRS) + ["dbname", "pid"]
-        for key, value in record.__dict__.items():
-            if key not in reserved_attrs and not (
-                hasattr(key, "startswith") and key.startswith("_")
-            ):
-                extra[key] = value
-        if extra:
-            response += " extra: " + json.dumps(extra, indent=4, sort_keys=True)
-        return response
+def _patch_request_init():
+    """Tag the thread handling an HTTP request with a unique request id."""
+    original_init = http.Request.__init__
+
+    @functools.wraps(original_init)
+    def __init__(self, httprequest):
+        original_init(self, httprequest)
+        threading.current_thread().request_uuid = str(uuid.uuid4())
+
+    http.Request.__init__ = __init__
 
 
-if is_true(os.environ.get("ODOO_LOGGING_JSON")):
-    format = "%(asctime)s %(pid)s %(levelname)s%(dbname)s %(name)s: %(message)s"
-    formatter = OdooJsonFormatter(format)
-    logging.getLogger().handlers[0].formatter = formatter
-elif is_true(os.environ.get("ODOO_LOGGING_JSON_DEV")):
-    format = "%(asctime)s %(pid)s %(levelname)s%(dbname)s %(name)s: %(message)s"
-    formatter = OdooJsonDevFormatter(format)
-    logging.getLogger().handlers[0].formatter = formatter
+def setup_json_logging():
+    """Switch the root logger handlers to JSON output if enabled.
+
+    Controlled by environment variables:
+
+    * ``ODOO_LOGGING_JSON``: enable JSON logging.
+    * ``ODOO_LOGGING_JSON_STDERR``: send records below WARNING to stdout and
+      WARNING and above to stderr.
+    """
+    if not is_true(os.environ.get("ODOO_LOGGING_JSON")):
+        return
+    root_logger = logging.getLogger()
+    if is_true(os.environ.get("ODOO_LOGGING_JSON_STDERR")):
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.addFilter(lambda record: record.levelno < logging.WARNING)
+        stderr_handler = logging.StreamHandler(sys.stderr)
+        stderr_handler.setLevel(logging.WARNING)
+        root_logger.handlers = [stdout_handler, stderr_handler]
+    formatter = OdooJsonFormatter(LOG_FORMAT)
+    for handler in root_logger.handlers:
+        handler.setFormatter(formatter)
+    _patch_request_init()
+
+
+def post_load():
+    setup_json_logging()

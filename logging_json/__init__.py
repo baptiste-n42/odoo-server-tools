@@ -1,1 +1,1 @@
-from . import json_log
+from .json_log import post_load
