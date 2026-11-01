@@ -1,30 +1,29 @@
-# -*- coding: utf-8 -*-
 # Copyright 2017 Camptocamp (http://www.camptocamp.com).
 # @author Guewen Baconnier <guewen.baconnier@camptocamp.com>
 # Copyright 2017 Akretion (http://www.akretion.com).
 # @author Sébastien BEAU <sebastien.beau@akretion.com>
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
+import json
 import logging
 import os
-import threading
 import re
-import json
-
+import threading
 from distutils.util import strtobool
+
 from openerp.netsvc import ColoredFormatter
 
 _logger = logging.getLogger(__name__)
 
 try:
-    from pythonjsonlogger.jsonlogger import JsonFormatter, RESERVED_ATTRS
+    from pythonjsonlogger.jsonlogger import RESERVED_ATTRS, JsonFormatter
 except ImportError:
     JsonFormatter = object
     _logger.debug("Cannot 'import pythonjsonlogger'.")
 
 
 def is_true(strval):
-    return bool(strtobool(strval or '0'.lower()))
+    return bool(strtobool(strval or "0".lower()))
 
 
 # The following regex are use to extract information from native odoo log
@@ -34,37 +33,42 @@ def is_true(strval):
 # In order to make understandable the regex please add an string example that
 # match
 REGEX = {
-    'openerp.addons.base.ir.ir_cron': [
+    "openerp.addons.base.ir.ir_cron": [
         # "cron.object.execute('db', 1, '*', u'base.action.rule', u'_check')"
-        (r"cron\.object\.execute\('.+'(?P<cron_model>[\w.]+).+"
-         r"'(?P<cron_method>[\w.]+)'\)",
-         {}, {'cron_running': True}),
-
+        (
+            r"cron\.object\.execute\('.+'(?P<cron_model>[\w.]+).+"
+            r"'(?P<cron_method>[\w.]+)'\)",
+            {},
+            {"cron_running": True},
+        ),
         # "0.016s (base.action.rule, _check)"
-        (r"(?P<cron_duration_second>[\d.]+)s \("
-         r"(?P<cron_model>[\w.]+), (?P<cron_method>[\w.]+)",
-         {'cron_duration_second': float},
-         {'cron_running': False, 'cron_status': 'succeeded'}),
-
+        (
+            r"(?P<cron_duration_second>[\d.]+)s \("
+            r"(?P<cron_model>[\w.]+), (?P<cron_method>[\w.]+)",
+            {"cron_duration_second": float},
+            {"cron_running": False, "cron_status": "succeeded"},
+        ),
         # Call of self.pool.get('base.action.rule')._check(
         # cr, uid, *u'()') failed in Job 43
-        (r"Call of self\.pool\.get\('(?P<cron_model>[\w.]+)'\)"
-         r".(?P<cron_method>[\w.]+)",
-         {}, {'cron_running': False, 'cron_status': 'failed'}),
+        (
+            r"Call of self\.pool\.get\('(?P<cron_model>[\w.]+)'\)"
+            r".(?P<cron_method>[\w.]+)",
+            {},
+            {"cron_running": False, "cron_status": "failed"},
+        ),
     ],
 }
 
 
 class OdooJsonFormatter(JsonFormatter):
-
     def add_fields(self, log_record, record, message_dict):
         record.pid = os.getpid()
-        record.dbname = getattr(threading.currentThread(), 'dbname', '?')
-        _super = super(OdooJsonFormatter, self)
+        record.dbname = getattr(threading.currentThread(), "dbname", "?")
+        _super = super()
         res = _super.add_fields(log_record, record, message_dict)
-        if log_record['name'] in REGEX:
-            for regex, formatters, extra_vals in REGEX[log_record['name']]:
-                match = re.match(regex, log_record['message'])
+        if log_record["name"] in REGEX:
+            for regex, formatters, extra_vals in REGEX[log_record["name"]]:
+                match = re.match(regex, log_record["message"])
                 if match:
                     vals = match.groupdict()
                     for key, func in formatters.items():
@@ -76,28 +80,25 @@ class OdooJsonFormatter(JsonFormatter):
 
 
 class OdooJsonDevFormatter(ColoredFormatter):
-
     def format(self, record):
-        response = super(OdooJsonDevFormatter, self).format(record)
+        response = super().format(record)
         extra = {}
         reserved_attrs = list(RESERVED_ATTRS) + ["dbname", "pid"]
         for key, value in record.__dict__.items():
-            if (key not in reserved_attrs and not
-                    (hasattr(key, "startswith") and key.startswith('_'))):
+            if key not in reserved_attrs and not (
+                hasattr(key, "startswith") and key.startswith("_")
+            ):
                 extra[key] = value
         if extra:
-            response += " extra: " + json.dumps(
-                extra, indent=4, sort_keys=True)
+            response += " extra: " + json.dumps(extra, indent=4, sort_keys=True)
         return response
 
 
-if is_true(os.environ.get('ODOO_LOGGING_JSON')):
-    format = ('%(asctime)s %(pid)s %(levelname)s'
-              '%(dbname)s %(name)s: %(message)s')
+if is_true(os.environ.get("ODOO_LOGGING_JSON")):
+    format = "%(asctime)s %(pid)s %(levelname)s%(dbname)s %(name)s: %(message)s"
     formatter = OdooJsonFormatter(format)
     logging.getLogger().handlers[0].formatter = formatter
-elif is_true(os.environ.get('ODOO_LOGGING_JSON_DEV')):
-    format = ('%(asctime)s %(pid)s %(levelname)s'
-              '%(dbname)s %(name)s: %(message)s')
+elif is_true(os.environ.get("ODOO_LOGGING_JSON_DEV")):
+    format = "%(asctime)s %(pid)s %(levelname)s%(dbname)s %(name)s: %(message)s"
     formatter = OdooJsonDevFormatter(format)
     logging.getLogger().handlers[0].formatter = formatter
